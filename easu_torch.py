@@ -2,7 +2,7 @@ import torch
 
 EPS = 1e-5
 class FSR_EASU(object):
-    def __init__(self, scale_factor=2.0, val=True):
+    def __init__(self, scale_factor=2.0):
         self.scale_factor = scale_factor
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
