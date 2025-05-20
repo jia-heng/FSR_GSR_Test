@@ -1,7 +1,9 @@
 import torch
 
 EPS = 1e-5
-class FSR_EASU(object):
+FSR_RCAS_LIMIT = 0.25 - 1.0 / 16.0
+
+class FSR(object):
     def __init__(self, scale_factor=2.0):
         self.scale_factor = scale_factor
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -109,7 +111,7 @@ class FSR_EASU(object):
         w = base * wa
         return w
 
-    def process(self, lr):
+    def easu_process(self, lr):
         B, C, H, W = lr.shape
         dst_H = int(H * self.scale_factor)
         dst_W = int(W * self.scale_factor)
@@ -224,3 +226,64 @@ class FSR_EASU(object):
 
         return result
 
+    ##    b
+    ##  d e f
+    ##    h
+    def get_near_block_five(self, img):
+        B, C, H, W = img.shape
+        # Generate normalized grid coordinates for all 12 points
+        img_pad = F.pad(img, [1, 1, 1, 1], mode="replicate")
+        offest = [
+            # b
+            (1, 0),
+            # d, e, f
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            # h
+            (1, 2)
+        ]
+
+        # Sample all points using direct indexing with clamping
+        sampled_points = []
+
+        for x_offset, y_offset in offest:
+            # Initialize output tensor
+            output = torch.zeros(B, C, H, W, device=self.device)
+            output[:, :] = img_pad[:, :, y_offset:H+y_offset, x_offset:W+x_offset]
+            sampled_points.append(output)
+
+        # Unpack to the expected format
+        b, d, e, f, h = sampled_points
+
+        return b, d, e, f, h
+
+    def rcas_process(self, img, sharpness_para=0.0, denoise=True):
+        sharpness = 2 ** (-sharpness_para)
+        lumen = self.transfergray(img)
+        b, d, e, f, h = self.get_near_block_five(img)
+        bl, dl, el, fl, hl = self.get_near_block_five(lumen)
+        # 噪声检测
+        nz = 0.25 * (bl + dl + fl + hl) - el
+        max_luma = torch.maximum(torch.maximum(torch.maximum(torch.maximum(bl, dl), el), fl), hl)
+        min_luma = torch.minimum(torch.minimum(torch.minimum(torch.minimum(bl, dl), el), fl), hl)
+        range_luma = torch.clamp(max_luma - min_luma, min=EPS)  # 避免除零
+        nz = torch.abs(nz) / range_luma
+        nz = torch.clamp(nz, 0.0, 1.0)
+        nz = (-0.5) * nz + 1.0
+        max_rgb = torch.maximum(torch.maximum(torch.maximum(b, d), f), h)
+        min_rgb = torch.minimum(torch.minimum(torch.minimum(b, d), f), h)
+        hitmin = torch.minimum(min_rgb, e) / (4 * max_rgb + EPS)
+        hitmax = (1.0 - torch.maximum(max_rgb, e)) / (4.0 * min_rgb - 4.0 + EPS)
+        lobe_rgb = torch.maximum(-hitmin, hitmax)
+        lobe, _ = torch.max(lobe_rgb, dim=1, keepdim=True)
+        lobe = torch.clip(lobe, -FSR_RCAS_LIMIT, 0.0)
+        lobe *= sharpness  # 应用锐化强度
+        if denoise:
+            lobe *= nz
+        # 计算加权平均
+        denom = 4.0 * lobe + 1.0
+        rcpL = torch.where(torch.abs(denom) < 1e-5, torch.ones_like(denom), 1.0 / denom)
+        output = (lobe * (b + d + f + h) + e) * rcpL
+        return output
+        
