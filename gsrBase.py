@@ -101,9 +101,7 @@ class SGSR:
             (0, 2), (1, 2)
         ]
 
-        # Sample all points using direct indexing with clamping
         sampled_points = []
-
         for dx, dy in grid_points:
             # Clamp coordinates to valid range
             x_clamped = torch.clamp(src_x + dx, 0, W - 1).long()
